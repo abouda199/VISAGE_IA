@@ -1,25 +1,27 @@
-import pygame
+
 import random
 import math
 
 
 # ============================================================
-# OUTILS
+# OUTILS MATHEMATIQUES
 # ============================================================
 
 def clamp(value, minimum, maximum):
-    return max(
-        minimum,
-        min(maximum, value)
-    )
+    return max(minimum, min(maximum, value))
 
 
 def lerp(a, b, amount):
     return a + (b - a) * amount
 
 
+def smoothstep(value):
+    value = clamp(value, 0.0, 1.0)
+    return value * value * (3.0 - 2.0 * value)
+
+
 # ============================================================
-# CLIGNEMENT
+# CLIGNEMENT NATUREL DES YEUX
 # ============================================================
 
 class BlinkAnimation:
@@ -30,60 +32,102 @@ class BlinkAnimation:
 
         self.blinking = False
 
-        self.direction = -1
+        self.time = 0.0
+        self.blink_start = 0.0
 
-        self.next_blink = (
-            pygame.time.get_ticks()
-            + random.randint(2500, 5000)
+        self.duration = 0.16
+
+        self.next_blink = random.uniform(
+            2.0, 4.5
         )
+
+        self.double_blink = False
 
     def update(self, dt):
 
-        now = pygame.time.get_ticks()
+        dt = max(0.0, dt)
+        self.time += dt
 
-        # Commencer un clignement
-        if (
-            not self.blinking
-            and now >= self.next_blink
-        ):
-            self.blinking = True
-            self.direction = -1
+        # --------------------------------------------
+        # ATTENTE AVANT LE PROCHAIN CLIGNEMENT
+        # --------------------------------------------
 
-        # Animation
+        if not self.blinking:
+
+            if self.time >= self.next_blink:
+
+                self.blinking = True
+                self.blink_start = self.time
+
+                self.duration = random.uniform(
+                    0.13, 0.20
+                )
+
+        # --------------------------------------------
+        # ANIMATION DU CLIGNEMENT
+        # --------------------------------------------
+
         if self.blinking:
 
-            self.value += (
-                self.direction
-                * dt
-                * 9
-            )
+            progress = (
+                self.time - self.blink_start
+            ) / self.duration
 
-            # Fermeture complète
-            if self.value <= 0.04:
+            if progress < 0.40:
 
-                self.value = 0.04
-                self.direction = 1
+                # Fermeture rapide
+                p = smoothstep(
+                    progress / 0.40
+                )
 
-            # Réouverture
-            elif self.value >= 1.0:
+                self.value = lerp(
+                    1.0, 0.04, p
+                )
+
+            elif progress < 1.0:
+
+                # Ouverture plus lente
+                p = smoothstep(
+                    (progress - 0.40) / 0.60
+                )
+
+                self.value = lerp(
+                    0.04, 1.0, p
+                )
+
+            else:
 
                 self.value = 1.0
-
                 self.blinking = False
 
-                self.next_blink = (
-                    now
-                    + random.randint(
-                        2500,
-                        5500
+                # Quelques doubles clignements
+                if (
+                    not self.double_blink
+                    and random.random() < 0.12
+                ):
+
+                    self.double_blink = True
+
+                    self.next_blink = (
+                        self.time + 0.18
                     )
-                )
+
+                else:
+
+                    self.double_blink = False
+
+                    self.next_blink = (
+                        self.time
+                        + random.uniform(
+                            2.2, 5.0
+                        )
+                    )
 
         return self.value
 
 
 # ============================================================
-# RESPIRATION / MOUVEMENT NATUREL
+# RESPIRATION NATURELLE
 # ============================================================
 
 class BreathingAnimation:
@@ -92,20 +136,33 @@ class BreathingAnimation:
 
         self.time = 0.0
 
+        self.speed = 1.15
+
+        self.amplitude = 2.0
+
     def update(self, dt):
 
-        self.time += dt
+        self.time += max(0.0, dt)
+
+        # Mouvement principal lent
+        primary = math.sin(
+            self.time * self.speed
+        )
+
+        # Très légère variation secondaire
+        secondary = (
+            math.sin(
+                self.time * 0.47
+            ) * 0.25
+        )
 
         return (
-            math.sin(
-                self.time * 1.4
-            )
-            * 2
-        )
+            primary + secondary
+        ) * self.amplitude
 
 
 # ============================================================
-# TRANSITION EMOTIONNELLE
+# TRANSITIONS EMOTIONNELLES FLUIDES
 # ============================================================
 
 class SmoothValue:
@@ -116,20 +173,25 @@ class SmoothValue:
         speed=5.0
     ):
 
-        self.current = value
-        self.target = value
+        self.current = float(value)
+        self.target = float(value)
 
-        self.speed = speed
+        self.speed = float(speed)
 
     def set_target(self, value):
 
-        self.target = value
+        self.target = float(value)
 
     def update(self, dt):
 
-        factor = min(
-            1.0,
-            dt * self.speed
+        dt = max(0.0, dt)
+
+        # Interpolation exponentielle :
+        # comportement stable même si le FPS varie
+        factor = (
+            1.0 - math.exp(
+                -self.speed * dt
+            )
         )
 
         self.current = lerp(
@@ -138,4 +200,55 @@ class SmoothValue:
             factor
         )
 
+        # Évite les petites oscillations numériques
+        if abs(
+            self.current - self.target
+        ) < 0.0001:
+
+            self.current = self.target
+
         return self.current
+
+
+# ============================================================
+# MICRO-MOUVEMENTS NATURELS
+# ============================================================
+
+class MicroMovement:
+
+    def __init__(
+        self,
+        amplitude=1.0,
+        speed=1.0
+    ):
+
+        self.time = 0.0
+
+        self.amplitude = amplitude
+        self.speed = speed
+
+        self.phase = random.uniform(
+            0.0,
+            2.0 * math.pi
+        )
+
+    def update(self, dt):
+
+        self.time += max(0.0, dt)
+
+        movement_1 = math.sin(
+            self.time * self.speed
+            + self.phase
+        )
+
+        movement_2 = (
+            math.sin(
+                self.time * self.speed * 0.37
+                + self.phase * 0.7
+            )
+            * 0.35
+        )
+
+        return (
+            movement_1 + movement_2
+        ) * self.amplitude
