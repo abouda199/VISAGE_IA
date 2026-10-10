@@ -1,97 +1,76 @@
 
-import asyncio
-import os
-import tempfile
 import threading
 
-import pygame
-import edge_tts
+import pyttsx3
+import pythoncom
 
 
 class VisageTTS:
 
     def __init__(self):
-
-        # Voix féminine française
-        self.voice = "fr-FR-DeniseNeural"
-
-        self.rate = "+0%"
-        self.volume = "+0%"
-
         self.speaking = False
         self.lock = threading.Lock()
 
-        if not pygame.mixer.get_init():
-            pygame.mixer.init()
+    def _speak(self, text):
+        initialized = False
 
-    async def generate_audio(self, text, path):
+        try:
+            pythoncom.CoInitialize()
+            initialized = True
 
-        communicate = edge_tts.Communicate(
-            text=text,
-            voice=self.voice,
-            rate=self.rate,
-            volume=self.volume
-        )
+            engine = pyttsx3.init("sapi5")
 
-        await communicate.save(path)
+            engine.setProperty("rate", 165)
+            engine.setProperty("volume", 1.0)
 
-    def speak(self, text):
+            voices = engine.getProperty("voices")
 
-        if not text or not text.strip():
-            return
+            # Chercher une voix française
+            for voice in voices:
+                name = voice.name.lower()
+                voice_id = voice.id.lower()
 
-        with self.lock:
+                if (
+                    "french" in name
+                    or "français" in name
+                    or "fr-fr" in voice_id
+                ):
+                    engine.setProperty(
+                        "voice",
+                        voice.id
+                    )
+                    break
 
-            path = None
+            print("🔊 VISAGE-AI parle...")
 
-            try:
+            engine.say(text)
+            engine.runAndWait()
+            engine.stop()
 
-                with tempfile.NamedTemporaryFile(
-                    suffix=".mp3",
-                    delete=False
-                ) as file:
+        except Exception as e:
+            print("Erreur TTS :", e)
 
-                    path = file.name
+        finally:
+            if initialized:
+                pythoncom.CoUninitialize()
 
-                # Générer le fichier audio
-                asyncio.run(
-                    self.generate_audio(text, path)
-                )
-
-                # Lecture de la voix
-                pygame.mixer.music.load(path)
-                pygame.mixer.music.play()
-
-                self.speaking = True
-
-                while pygame.mixer.music.get_busy():
-                    pygame.time.wait(50)
-
-            except Exception as e:
-
-                print("Erreur TTS :", e)
-
-            finally:
-
+            with self.lock:
                 self.speaking = False
 
-                try:
-                    pygame.mixer.music.unload()
-                except pygame.error:
-                    pass
-
-                if path and os.path.exists(path):
-                    try:
-                        os.remove(path)
-                    except OSError:
-                        pass
-
     def speak_async(self, text):
+        if not text or not text.strip():
+            return False
 
-        thread = threading.Thread(
-            target=self.speak,
+        with self.lock:
+            if self.speaking:
+                return False
+
+            self.speaking = True
+
+        threading.Thread(
+            target=self._speak,
             args=(text,),
             daemon=True
-        )
+        ).start()
 
-        thread.start()
+        return True

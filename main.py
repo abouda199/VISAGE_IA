@@ -3,10 +3,12 @@ import pygame
 import sys
 import threading
 import queue
+import time
 
 from face.face_engine import FaceEngine
 from brain.llm import VisageLLM
 from speech.tts import VisageTTS
+from speech.stt import VisageSTT
 
 
 # ============================================================
@@ -33,25 +35,40 @@ face = FaceEngine(WIDTH, HEIGHT)
 llm = VisageLLM()
 tts = VisageTTS()
 
+stt = None
+
+# ============================================================
+# ETATS
+# ============================================================
+
+auto_mode = True
+
+is_listening = False
+is_thinking = False
+is_loading_stt = False
+
+stop_listening = threading.Event()
+
+# Empêche de reprendre l'écoute immédiatement
+# après la réponse vocale
+resume_at = time.monotonic() + 1.0
+
+result_queue = queue.Queue()
+
+input_text = ""
+last_message = ""
+
+ai_response = "Bonjour ! Je suis VISAGE-AI."
+
+current_emotion = "neutral"
+current_intensity = 1.0
+
 # ============================================================
 # INTERFACE
 # ============================================================
 
 font = pygame.font.SysFont("arial", 21)
 small_font = pygame.font.SysFont("arial", 17)
-
-input_text = ""
-last_message = ""
-
-ai_response = (
-    "Bonjour ! Je suis VISAGE-AI."
-)
-
-current_emotion = "neutral"
-
-is_thinking = False
-
-result_queue = queue.Queue()
 
 INPUT_RECT = pygame.Rect(
     30,
@@ -62,13 +79,11 @@ INPUT_RECT = pygame.Rect(
 
 
 # ============================================================
-# APPEL GEMINI
+# GEMINI
 # ============================================================
 
 def ask_gemini(message):
-
     try:
-
         result = llm.analyze(message)
 
         result_queue.put(
@@ -76,14 +91,102 @@ def ask_gemini(message):
         )
 
     except Exception as e:
-
         result_queue.put(
             ("error", str(e))
         )
 
 
 # ============================================================
-# AFFICHAGE TEXTE
+# WHISPER
+# ============================================================
+
+def listen_microphone():
+    global stt
+
+    try:
+        if stt is None:
+            result_queue.put(
+                ("stt_loading", None)
+            )
+
+            stt = VisageSTT()
+
+        text = stt.listen_auto(
+            stop_event=stop_listening,
+            start_timeout=10,
+            silence_duration=0.9,
+            max_duration=15
+        )
+
+        result_queue.put(
+            ("transcription", text)
+        )
+
+    except Exception as e:
+        result_queue.put(
+            ("stt_error", str(e))
+        )
+
+
+def start_listening():
+    global is_listening
+
+    if (
+        is_listening
+        or is_thinking
+        or tts.speaking
+        or not auto_mode
+    ):
+        return
+
+    stop_listening.clear()
+    is_listening = True
+
+    threading.Thread(
+        target=listen_microphone,
+        daemon=True
+    ).start()
+
+
+# ============================================================
+# ENVOYER UN MESSAGE A GEMINI
+# ============================================================
+
+def submit_message(message):
+    global last_message
+    global ai_response
+    global is_thinking
+    global resume_at
+
+    message = message.strip()
+
+    if not message:
+        return
+
+    if is_thinking or is_listening:
+        return
+
+    last_message = message
+    is_thinking = True
+
+    resume_at = float("inf")
+
+    ai_response = "VISAGE-AI réfléchit..."
+
+    face.set_emotion(
+        "thinking",
+        1.0
+    )
+
+    threading.Thread(
+        target=ask_gemini,
+        args=(message,),
+        daemon=True
+    ).start()
+
+
+# ============================================================
+# TEXTE MULTILIGNE
 # ============================================================
 
 def draw_wrapped_text(
@@ -96,27 +199,20 @@ def draw_wrapped_text(
     font_obj,
     max_lines=3
 ):
-
-    words = text.split()
+    words = str(text).split()
 
     lines = []
     current_line = ""
 
     for word in words:
-
         candidate = (
             f"{current_line} {word}".strip()
         )
 
-        if (
-            font_obj.size(candidate)[0]
-            <= max_width
-        ):
-
+        if font_obj.size(candidate)[0] <= max_width:
             current_line = candidate
 
         else:
-
             if current_line:
                 lines.append(current_line)
 
@@ -128,7 +224,6 @@ def draw_wrapped_text(
     for index, line in enumerate(
         lines[:max_lines]
     ):
-
         rendered = font_obj.render(
             line,
             True,
@@ -146,6 +241,7 @@ def draw_wrapped_text(
 # ============================================================
 
 running = True
+was_speaking = False
 
 while running:
 
@@ -162,149 +258,232 @@ while running:
 
         elif event.type == pygame.KEYDOWN:
 
+            # QUITTER
             if event.key == pygame.K_ESCAPE:
                 running = False
 
-            elif event.key == pygame.K_RETURN:
+            # F2 : ACTIVER / DESACTIVER MODE AUTO
+            elif event.key == pygame.K_F2:
+                auto_mode = not auto_mode
 
+                if not auto_mode:
+                    stop_listening.set()
+                    resume_at = float("inf")
+                    ai_response = (
+                        "Mode vocal automatique désactivé."
+                    )
+                else:
+                    resume_at = (
+                        time.monotonic() + 0.5
+                    )
+                    ai_response = (
+                        "Mode vocal automatique activé."
+                    )
+
+                print(
+                    "Mode automatique :",
+                    auto_mode
+                )
+
+            # ENTRÉE : MESSAGE TEXTE
+            elif event.key == pygame.K_RETURN:
                 if (
                     input_text.strip()
                     and not is_thinking
+                    and not is_listening
+                    and not tts.speaking
                 ):
-
-                    last_message = (
-                        input_text.strip()
-                    )
-
+                    message = input_text.strip()
                     input_text = ""
 
-                    is_thinking = True
+                    submit_message(message)
 
-                    ai_response = (
-                        "VISAGE-AI réfléchit..."
-                    )
-
-                    face.set_emotion(
-                        "thinking",
-                        1.0
-                    )
-
-                    worker = threading.Thread(
-                        target=ask_gemini,
-                        args=(last_message,),
-                        daemon=True
-                    )
-
-                    worker.start()
-
+            # BACKSPACE
             elif event.key == pygame.K_BACKSPACE:
-
                 input_text = input_text[:-1]
 
+            # SAISIE NORMALE
             else:
-
                 if (
                     event.unicode
                     and event.unicode.isprintable()
+                    and not is_listening
                 ):
-
                     if len(input_text) < 1000:
                         input_text += event.unicode
 
     # ========================================================
-    # REPONSE GEMINI
+    # RESULTATS ASYNCHRONES
     # ========================================================
 
-    try:
+    while True:
+        try:
+            status, result = (
+                result_queue.get_nowait()
+            )
+        except queue.Empty:
+            break
 
-        status, result = (
-            result_queue.get_nowait()
-        )
-
-        is_thinking = False
-
-        if status == "success":
-
-            current_emotion = (
-                result["emotion"]
+        # WHISPER CHARGE
+        if status == "stt_loading":
+            is_loading_stt = True
+            ai_response = (
+                "Chargement de Whisper..."
             )
 
-            intensity = (
-                result["intensity"]
-            )
+        # TRANSCRIPTION
+        elif status == "transcription":
+            is_listening = False
+            is_loading_stt = False
+
+            recognized_text = result.strip()
+
+            if recognized_text:
+                print(
+                    "\n🎤 Vous :",
+                    recognized_text
+                )
+
+                submit_message(
+                    recognized_text
+                )
+
+            else:
+                resume_at = (
+                    time.monotonic() + 0.4
+                )
+
+        # ERREUR MICROPHONE
+        elif status == "stt_error":
+            is_listening = False
+            is_loading_stt = False
 
             ai_response = (
-                result["response"]
+                f"Erreur microphone : {result}"
+            )
+
+            print(ai_response)
+
+            # Désactiver pour éviter une
+            # boucle infinie d'erreurs
+            auto_mode = False
+            resume_at = float("inf")
+
+        # REPONSE GEMINI
+        elif status == "success":
+            is_thinking = False
+
+            current_emotion = result.get(
+                "emotion",
+                "neutral"
+            )
+
+            try:
+                current_intensity = float(
+                    result.get("intensity", 1.0)
+                )
+            except (ValueError, TypeError):
+                current_intensity = 1.0
+
+            current_intensity = max(
+                0.0,
+                min(1.0, current_intensity)
+            )
+
+            ai_response = str(
+                result.get("response", "")
             )
 
             face.set_emotion(
                 current_emotion,
-                intensity
+                current_intensity
             )
 
             print(
-                "\nMESSAGE :", last_message
+                "\nEMOTION :",
+                current_emotion
             )
 
             print(
-                "EMOTION :", current_emotion
-            )
-
-            print(
-                "INTENSITE :", intensity
-            )
-
-            print(
-                "REPONSE :", ai_response
-            )
-
-            # ================================================
-            # VOIX FEMININE FRANCAISE
-            # ================================================
-
-            tts.speak_async(
+                "REPONSE :",
                 ai_response
             )
 
-        else:
+            if ai_response.strip():
+                started = tts.speak_async(
+                    ai_response
+                )
+
+                if not started:
+                    resume_at = (
+                        time.monotonic() + 1.0
+                    )
+            else:
+                resume_at = (
+                    time.monotonic() + 1.0
+                )
+
+        # ERREUR GEMINI
+        elif status == "error":
+            is_thinking = False
 
             current_emotion = "neutral"
+            current_intensity = 1.0
 
             ai_response = (
                 f"Erreur Gemini : {result}"
             )
 
             face.set_emotion(
-                "neutral"
+                "neutral",
+                1.0
             )
 
             print(ai_response)
 
-    except queue.Empty:
-        pass
+            resume_at = (
+                time.monotonic() + 1.0
+            )
 
     # ========================================================
-    # ANIMATION DE LA BOUCHE
+    # FIN DE LA REPONSE VOCALE
+    # ========================================================
+
+    if was_speaking and not tts.speaking:
+        resume_at = (
+            time.monotonic() + 1.0
+        )
+
+        face.set_emotion(
+            current_emotion,
+            current_intensity
+        )
+
+    was_speaking = tts.speaking
+
+    # ========================================================
+    # DEMARRAGE AUTOMATIQUE DE L'ECOUTE
+    # ========================================================
+
+    if (
+        auto_mode
+        and not is_listening
+        and not is_thinking
+        and not tts.speaking
+        and not input_text.strip()
+        and time.monotonic() >= resume_at
+    ):
+        start_listening()
+
+    # ========================================================
+    # ANIMATION BOUCHE
     # ========================================================
 
     if tts.speaking:
-
         if face.emotion != "talking":
-
             face.set_emotion(
                 "talking",
                 0.65
-            )
-
-    else:
-
-        if (
-            face.emotion == "talking"
-        ):
-
-            face.set_emotion(
-                current_emotion,
-                1.0
             )
 
     # ========================================================
@@ -315,7 +494,7 @@ while running:
     face.draw(screen)
 
     # ========================================================
-    # PANNEAU DE CONVERSATION
+    # PANNEAU CONVERSATION
     # ========================================================
 
     panel = pygame.Rect(
@@ -403,21 +582,15 @@ while running:
         and font.size(visible_text)[0]
         > INPUT_RECT.width - 25
     ):
-
-        visible_text = (
-            visible_text[1:]
-        )
+        visible_text = visible_text[1:]
 
     if not visible_text:
-
         visible_text = (
-            "Ecrivez un message puis appuyez sur Entree..."
+            "F2 : mode vocal auto | "
+            "Entree : envoyer du texte..."
         )
-
         color = (115, 135, 155)
-
     else:
-
         color = (235, 245, 255)
 
     rendered = font.render(
@@ -435,11 +608,59 @@ while running:
     )
 
     # ========================================================
-    # AFFICHAGE
+    # INDICATEUR D'ETAT
     # ========================================================
+
+    if is_loading_stt:
+        indicator_text = "CHARGEMENT WHISPER"
+        indicator_color = (255, 205, 80)
+
+    elif is_listening:
+        indicator_text = "MICROPHONE ACTIF"
+        indicator_color = (255, 90, 90)
+
+    elif is_thinking:
+        indicator_text = "GEMINI REFLECHIT..."
+        indicator_color = (255, 205, 80)
+
+    elif tts.speaking:
+        indicator_text = "VISAGE-AI PARLE"
+        indicator_color = (0, 225, 180)
+
+    elif auto_mode:
+        indicator_text = "MODE VOCAL AUTOMATIQUE"
+        indicator_color = (0, 200, 220)
+
+    else:
+        indicator_text = "MODE CLAVIER | F2 POUR PARLER"
+        indicator_color = (170, 190, 210)
+
+    indicator = small_font.render(
+        indicator_text,
+        True,
+        indicator_color
+    )
+
+    indicator_rect = indicator.get_rect(
+        center=(
+            WIDTH // 2,
+            HEIGHT - 90
+        )
+    )
+
+    screen.blit(
+        indicator,
+        indicator_rect
+    )
 
     pygame.display.flip()
 
+
+# ============================================================
+# FERMETURE
+# ============================================================
+
+stop_listening.set()
 
 pygame.quit()
 sys.exit()
