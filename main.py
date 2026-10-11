@@ -10,9 +10,7 @@ from brain.llm import VisageLLM
 from speech.tts import VisageTTS
 from speech.stt import VisageSTT
 
-# NOUVEAU : AGENTS IA
-from agents.router import AgentRouter
-
+from agents.smart_router import SmartAgentRouter
 
 # ============================================================
 # INITIALISATION
@@ -37,7 +35,7 @@ llm = VisageLLM()
 tts = VisageTTS()
 
 # Initialisation du routeur d'agents
-router = AgentRouter()
+router = SmartAgentRouter()
 
 stt = None
 
