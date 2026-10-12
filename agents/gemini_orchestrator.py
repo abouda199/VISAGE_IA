@@ -1,26 +1,25 @@
 
 import os
 import json
+from pathlib import Path
 
 from dotenv import load_dotenv
 from google import genai
 from google.genai import types
 
 
-load_dotenv()
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+load_dotenv(PROJECT_ROOT / ".env")
 
 
 class GeminiOrchestrator:
-    """
-    Analyse les commandes de VISAGE-AI
-    et sélectionne une action structurée.
-    """
 
     ALLOWED_ACTIONS = {
         "music",
         "website",
         "search",
         "application",
+        "iot",
         "chat"
     }
 
@@ -32,13 +31,10 @@ class GeminiOrchestrator:
 
         if not api_key:
             raise RuntimeError(
-                "Clé Gemini introuvable. "
-                "Vérifie GEMINI_API_KEY dans .env."
+                "Clé API Gemini introuvable dans .env"
             )
 
-        self.client = genai.Client(
-            api_key=api_key
-        )
+        self.client = genai.Client(api_key=api_key)
 
         self.model = os.getenv(
             "GEMINI_MODEL",
@@ -55,47 +51,75 @@ class GeminiOrchestrator:
             }
 
         system_instruction = """
-Tu es l'orchestrateur d'un assistant vocal Windows
-nommé VISAGE-AI.
+Tu es Gemini Orchestrator, le système intelligent
+de routage de l'assistant vocal VISAGE-AI.
 
-Ta tâche est d'analyser la transcription Whisper
-et de choisir une action.
+Tu analyses une transcription vocale Whisper et
+sélectionnes UNE action parmi :
 
-ACTIONS AUTORISÉES :
+1. music
+   Jouer une chanson sur YouTube.
+   target = titre de la chanson et artiste.
 
-music :
-L'utilisateur souhaite écouter une chanson ou un artiste.
+2. website
+   Ouvrir un site Internet.
+   target = nom du site.
 
-website :
-L'utilisateur souhaite ouvrir un site Internet.
+3. search
+   Effectuer une recherche Google.
+   target = requête de recherche.
 
-search :
-L'utilisateur souhaite effectuer une recherche Google.
+4. application
+   Ouvrir une application Windows.
+   target = nom de l'application.
 
-application :
-L'utilisateur souhaite lancer une application Windows.
+5. iot
+   Contrôler une lumière virtuelle.
+   target doit être exactement :
+   "light:on" ou "light:off"
 
-chat :
-L'utilisateur pose une question ou souhaite discuter.
+6. chat
+   Conversation normale ou question générale.
+   target = ""
 
-Réponds uniquement avec un objet JSON :
-{
-    "action": "music",
-    "target": "Shape of You Ed Sheeran"
-}
+COMMANDES IOT :
+
+"Allume la lumière"
+-> {"action":"iot","target":"light:on"}
+
+"Ouvre la lumière"
+-> {"action":"iot","target":"light:on"}
+
+"Active la lumière"
+-> {"action":"iot","target":"light:on"}
+
+"Éteins la lumière"
+-> {"action":"iot","target":"light:off"}
+
+"Ferme la lumière"
+-> {"action":"iot","target":"light:off"}
+
+"Désactive la lumière"
+-> {"action":"iot","target":"light:off"}
+
+"VISAGE, ouvre la lumière"
+-> {"action":"iot","target":"light:on"}
 
 RÈGLES :
+- Réponds uniquement avec un objet JSON.
+- Ne prétends jamais avoir exécuté une action.
+- Ne déclenche pas d'action pour une simple question.
+- Corrige les erreurs de transcription évidentes.
+- N'invente aucune commande système.
+- Pour iot, utilise uniquement light:on ou light:off.
+- En cas de doute, choisis chat.
 
-1. Ne déclenche pas d'action pour une simple question.
-2. Corrige les erreurs évidentes de transcription.
-3. Ne devine pas un titre lorsque plusieurs choix sont possibles.
-4. Pour music, target contient le titre et l'artiste si connus.
-5. Pour website, target contient le nom du site.
-6. Pour application, target contient le nom de l'application.
-7. Pour search, target contient la requête.
-8. Ne prétends jamais avoir exécuté une action.
-9. N'invente pas de commandes système.
-10. En cas de doute sur l'intention, choisis chat.
+FORMAT DE RÉPONSE :
+
+{
+    "action": "iot",
+    "target": "light:on"
+}
 """
 
         response = self.client.models.generate_content(
@@ -117,7 +141,7 @@ RÈGLES :
 
         if not isinstance(data, dict):
             raise ValueError(
-                "La réponse Gemini n'est pas un objet JSON."
+                "Réponse Gemini invalide."
             )
 
         action = str(
@@ -131,6 +155,11 @@ RÈGLES :
         if action not in self.ALLOWED_ACTIONS:
             action = "chat"
             target = ""
+
+        if action == "iot":
+            if target not in {"light:on", "light:off"}:
+                action = "chat"
+                target = ""
 
         return {
             "action": action,
