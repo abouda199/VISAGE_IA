@@ -9,8 +9,9 @@ from face.face_engine import FaceEngine
 from brain.llm import VisageLLM
 from speech.tts import VisageTTS
 from speech.stt import VisageSTT
-
 from agents.smart_router import SmartAgentRouter
+from vision.vision_agent import VisionAgent
+
 
 # ============================================================
 # INITIALISATION
@@ -23,9 +24,8 @@ HEIGHT = 600
 FPS = 60
 
 screen = pygame.display.set_mode((WIDTH, HEIGHT))
-
 pygame.display.set_caption(
-    "VISAGE-AI | Assistant vocal intelligent + Agents IA"
+    "VISAGE-AI | Assistant vocal intelligent + Agents IA + Vision"
 )
 
 clock = pygame.time.Clock()
@@ -33,12 +33,18 @@ clock = pygame.time.Clock()
 face = FaceEngine(WIDTH, HEIGHT)
 llm = VisageLLM()
 tts = VisageTTS()
-
-# Initialisation du routeur d'agents
 router = SmartAgentRouter()
 
 stt = None
 
+# ============================================================
+# VISION AGENT
+# ============================================================
+
+vision = VisionAgent(camera_index=0)
+vision_enabled = vision.start()
+
+face.set_vision_enabled(vision_enabled)
 
 # ============================================================
 # ETATS
@@ -51,21 +57,20 @@ is_thinking = False
 is_loading_stt = False
 
 stop_listening = threading.Event()
-
 resume_at = time.monotonic() + 1.0
 
 result_queue = queue.Queue()
 
 input_text = ""
 last_message = ""
-
 ai_response = "Bonjour ! Je suis VISAGE-AI."
 
 current_emotion = "neutral"
 current_intensity = 1.0
-
 active_agent = "Aucun"
 
+running = True
+was_speaking = False
 
 # ============================================================
 # INTERFACE
@@ -75,10 +80,7 @@ font = pygame.font.SysFont("arial", 21)
 small_font = pygame.font.SysFont("arial", 17)
 
 INPUT_RECT = pygame.Rect(
-    30,
-    HEIGHT - 65,
-    WIDTH - 60,
-    45
+    30, HEIGHT - 65, WIDTH - 60, 45
 )
 
 
@@ -89,15 +91,9 @@ INPUT_RECT = pygame.Rect(
 def ask_gemini(message):
     try:
         result = llm.analyze(message)
-
-        result_queue.put(
-            ("success", result)
-        )
-
+        result_queue.put(("success", result))
     except Exception as e:
-        result_queue.put(
-            ("error", str(e))
-        )
+        result_queue.put(("error", str(e)))
 
 
 # ============================================================
@@ -105,17 +101,6 @@ def ask_gemini(message):
 # ============================================================
 
 def execute_agent(message):
-    """
-    Analyse une commande et exécute un agent spécialisé.
-
-    Retour attendu du routeur :
-    {
-        "handled": True/False,
-        "response": "...",
-        "emotion": "happy"
-    }
-    """
-
     try:
         result = router.execute(message)
 
@@ -123,18 +108,12 @@ def execute_agent(message):
             result = {"handled": False}
 
         if result.get("handled", False):
-            result_queue.put(
-                ("agent_success", result)
-            )
+            result_queue.put(("agent_success", result))
         else:
-            result_queue.put(
-                ("agent_not_handled", message)
-            )
+            result_queue.put(("agent_not_handled", message))
 
     except Exception as e:
-        result_queue.put(
-            ("agent_error", str(e))
-        )
+        result_queue.put(("agent_error", str(e)))
 
 
 # ============================================================
@@ -146,10 +125,7 @@ def listen_microphone():
 
     try:
         if stt is None:
-            result_queue.put(
-                ("stt_loading", None)
-            )
-
+            result_queue.put(("stt_loading", None))
             stt = VisageSTT()
 
         text = stt.listen_auto(
@@ -159,14 +135,10 @@ def listen_microphone():
             max_duration=15
         )
 
-        result_queue.put(
-            ("transcription", text)
-        )
+        result_queue.put(("transcription", text))
 
     except Exception as e:
-        result_queue.put(
-            ("stt_error", str(e))
-        )
+        result_queue.put(("stt_error", str(e)))
 
 
 def start_listening():
@@ -210,21 +182,14 @@ def submit_message(message):
         return
 
     last_message = message
-
     is_thinking = True
     resume_at = float("inf")
 
     ai_response = "VISAGE-AI analyse votre demande..."
-
     active_agent = "Orchestrateur"
 
-    face.set_emotion(
-        "thinking",
-        1.0
-    )
+    face.set_emotion("thinking", 1.0)
 
-    # D'abord, vérifier si un agent peut traiter la demande.
-    # Sinon, transmettre à Gemini.
     threading.Thread(
         target=execute_agent,
         args=(message,),
@@ -244,7 +209,6 @@ def speak_response(response):
 
         if not started:
             resume_at = time.monotonic() + 1.0
-
     else:
         resume_at = time.monotonic() + 1.0
 
@@ -263,40 +227,28 @@ def draw_wrapped_text(
     font_obj,
     max_lines=3
 ):
-
     words = str(text).split()
 
     lines = []
     current_line = ""
 
     for word in words:
-
-        candidate = (
-            f"{current_line} {word}".strip()
-        )
+        candidate = f"{current_line} {word}".strip()
 
         if font_obj.size(candidate)[0] <= max_width:
             current_line = candidate
-
         else:
             if current_line:
                 lines.append(current_line)
-
             current_line = word
 
     if current_line:
         lines.append(current_line)
 
-    for index, line in enumerate(
-        lines[:max_lines]
-    ):
-
+    for index, line in enumerate(lines[:max_lines]):
         rendered = font_obj.render(
-            line,
-            True,
-            color
+            line, True, color
         )
-
         surface.blit(
             rendered,
             (x, y + index * 23)
@@ -307,568 +259,525 @@ def draw_wrapped_text(
 # BOUCLE PRINCIPALE
 # ============================================================
 
-running = True
-was_speaking = False
+try:
+    while running:
+        dt = clock.tick(FPS) / 1000.0
 
-while running:
+        # ====================================================
+        # EVENEMENTS
+        # ====================================================
 
-    dt = clock.tick(FPS) / 1000.0
+        for event in pygame.event.get():
 
-    # ========================================================
-    # EVENEMENTS
-    # ========================================================
-
-    for event in pygame.event.get():
-
-        if event.type == pygame.QUIT:
-            running = False
-
-        elif event.type == pygame.KEYDOWN:
-
-            # QUITTER
-            if event.key == pygame.K_ESCAPE:
+            if event.type == pygame.QUIT:
                 running = False
 
-            # F2 : ACTIVER / DESACTIVER MODE AUTO
-            elif event.key == pygame.K_F2:
+            elif event.type == pygame.KEYDOWN:
 
-                auto_mode = not auto_mode
+                if event.key == pygame.K_ESCAPE:
+                    running = False
 
-                if not auto_mode:
-                    stop_listening.set()
-                    resume_at = float("inf")
+                # F2 : MODE VOCAL AUTOMATIQUE
+                elif event.key == pygame.K_F2:
+                    auto_mode = not auto_mode
 
-                    ai_response = (
-                        "Mode vocal automatique désactivé."
+                    if not auto_mode:
+                        stop_listening.set()
+                        resume_at = float("inf")
+                        ai_response = (
+                            "Mode vocal automatique désactivé."
+                        )
+                    else:
+                        resume_at = time.monotonic() + 0.5
+                        ai_response = (
+                            "Mode vocal automatique activé."
+                        )
+
+                    print(
+                        "[VOCAL] Mode automatique :",
+                        auto_mode
                     )
+
+                # F4 : ACTIVER / DESACTIVER LA CAMERA
+                elif event.key == pygame.K_F4:
+
+                    if vision_enabled:
+                        vision.stop()
+                        vision_enabled = False
+                        face.set_vision_enabled(False)
+                        face.set_vision_position(False)
+
+                        ai_response = (
+                            "VisionAgent désactivé. "
+                            "Les yeux suivent la souris."
+                        )
+
+                        print("[VISION] Mode souris.")
+
+                    else:
+                        vision_enabled = vision.start()
+                        face.set_vision_enabled(
+                            vision_enabled
+                        )
+
+                        if vision_enabled:
+                            ai_response = (
+                                "VisionAgent activé. "
+                                "Les yeux suivent votre visage."
+                            )
+                        else:
+                            ai_response = (
+                                "Impossible d'activer VisionAgent. "
+                                "Vérifiez la caméra et le modèle."
+                            )
+
+                        print(
+                            "[VISION] Mode webcam :",
+                            vision_enabled
+                        )
+
+                # ENTREE : ENVOYER LE MESSAGE
+                elif event.key == pygame.K_RETURN:
+
+                    if (
+                        input_text.strip()
+                        and not is_thinking
+                        and not is_listening
+                        and not tts.speaking
+                    ):
+                        message = input_text.strip()
+                        input_text = ""
+                        submit_message(message)
+
+                elif event.key == pygame.K_BACKSPACE:
+                    input_text = input_text[:-1]
 
                 else:
-                    resume_at = (
-                        time.monotonic() + 0.5
-                    )
-
-                    ai_response = (
-                        "Mode vocal automatique activé."
-                    )
-
-                print(
-                    "Mode automatique :",
-                    auto_mode
-                )
-
-            # ENTREE : MESSAGE TEXTE
-            elif event.key == pygame.K_RETURN:
-
-                if (
-                    input_text.strip()
-                    and not is_thinking
-                    and not is_listening
-                    and not tts.speaking
-                ):
-
-                    message = input_text.strip()
-                    input_text = ""
-
-                    submit_message(message)
-
-            # BACKSPACE
-            elif event.key == pygame.K_BACKSPACE:
-
-                input_text = input_text[:-1]
-
-            # SAISIE NORMALE
-            else:
-
-                if (
-                    event.unicode
-                    and event.unicode.isprintable()
-                    and not is_listening
-                ):
-
-                    if len(input_text) < 1000:
-                        input_text += event.unicode
-
-    # ========================================================
-    # RESULTATS ASYNCHRONES
-    # ========================================================
-
-    while True:
-
-        try:
-            status, result = (
-                result_queue.get_nowait()
-            )
-
-        except queue.Empty:
-            break
-
-        # WHISPER CHARGE
-        if status == "stt_loading":
-
-            is_loading_stt = True
-
-            ai_response = (
-                "Chargement de Whisper..."
-            )
-
-        # TRANSCRIPTION
-        elif status == "transcription":
-
-            is_listening = False
-            is_loading_stt = False
-
-            recognized_text = (
-                str(result).strip()
-                if result is not None
-                else ""
-            )
-
-            if recognized_text:
-
-                print(
-                    "\nVous :",
-                    recognized_text
-                )
-
-                submit_message(
-                    recognized_text
-                )
-
-            else:
-
-                resume_at = (
-                    time.monotonic() + 0.4
-                )
-
-        # ERREUR MICROPHONE
-        elif status == "stt_error":
-
-            is_listening = False
-            is_loading_stt = False
-
-            ai_response = (
-                f"Erreur microphone : {result}"
-            )
-
-            print(ai_response)
-
-            auto_mode = False
-            resume_at = float("inf")
+                    if (
+                        event.unicode
+                        and event.unicode.isprintable()
+                        and not is_listening
+                    ):
+                        if len(input_text) < 1000:
+                            input_text += event.unicode
 
         # ====================================================
-        # AGENT : COMMANDE EXECUTEE
+        # RESULTATS ASYNCHRONES
         # ====================================================
 
-        elif status == "agent_success":
-
-            is_thinking = False
-
-            active_agent = result.get(
-                "agent",
-                "Agent IA"
-            )
-
-            current_emotion = result.get(
-                "emotion",
-                "happy"
-            )
-
-            current_intensity = 0.8
-
-            ai_response = str(
-                result.get(
-                    "response",
-                    "Commande exécutée."
-                )
-            )
-
-            face.set_emotion(
-                current_emotion,
-                current_intensity
-            )
-
-            print(
-                "\nAGENT :",
-                active_agent
-            )
-
-            print(
-                "REPONSE :",
-                ai_response
-            )
-
-            speak_response(ai_response)
-
-        # ====================================================
-        # AGENT : DEMANDE NON RECONNUE -> GEMINI
-        # ====================================================
-
-        elif status == "agent_not_handled":
-
-            active_agent = "Gemini"
-
-            ai_response = (
-                "VISAGE-AI réfléchit..."
-            )
-
-            threading.Thread(
-                target=ask_gemini,
-                args=(result,),
-                daemon=True
-            ).start()
-
-        # ====================================================
-        # ERREUR AGENT
-        # ====================================================
-
-        elif status == "agent_error":
-
-            is_thinking = False
-
-            active_agent = "Agent IA"
-
-            current_emotion = "sad"
-            current_intensity = 0.7
-
-            ai_response = (
-                f"Impossible d'exécuter la commande : {result}"
-            )
-
-            face.set_emotion(
-                current_emotion,
-                current_intensity
-            )
-
-            print(ai_response)
-
-            speak_response(
-                "Désolé, je n'ai pas pu exécuter cette commande."
-            )
-
-        # ====================================================
-        # REPONSE GEMINI
-        # ====================================================
-
-        elif status == "success":
-
-            is_thinking = False
-
-            if not isinstance(result, dict):
-                result = {
-                    "emotion": "neutral",
-                    "intensity": 1.0,
-                    "response": str(result)
-                }
-
-            current_emotion = result.get(
-                "emotion",
-                "neutral"
-            )
-
+        while True:
             try:
-                current_intensity = float(
+                status, result = result_queue.get_nowait()
+            except queue.Empty:
+                break
+
+            # CHARGEMENT WHISPER
+            if status == "stt_loading":
+                is_loading_stt = True
+                ai_response = "Chargement de Whisper..."
+
+            # TRANSCRIPTION
+            elif status == "transcription":
+                is_listening = False
+                is_loading_stt = False
+
+                recognized_text = (
+                    str(result).strip()
+                    if result is not None
+                    else ""
+                )
+
+                if recognized_text:
+                    print("\nVous :", recognized_text)
+                    submit_message(recognized_text)
+                else:
+                    resume_at = time.monotonic() + 0.4
+
+            # ERREUR MICROPHONE
+            elif status == "stt_error":
+                is_listening = False
+                is_loading_stt = False
+
+                ai_response = (
+                    f"Erreur microphone : {result}"
+                )
+
+                print(ai_response)
+
+                auto_mode = False
+                resume_at = float("inf")
+
+            # AGENT : COMMANDE EXECUTEE
+            elif status == "agent_success":
+                is_thinking = False
+
+                active_agent = result.get(
+                    "agent", "Agent IA"
+                )
+
+                current_emotion = result.get(
+                    "emotion", "happy"
+                )
+
+                current_intensity = 0.8
+
+                ai_response = str(
                     result.get(
-                        "intensity",
-                        1.0
+                        "response",
+                        "Commande exécutée."
                     )
                 )
 
-            except (ValueError, TypeError):
+                face.set_emotion(
+                    current_emotion,
+                    current_intensity
+                )
+
+                print("\nAGENT :", active_agent)
+                print("REPONSE :", ai_response)
+
+                speak_response(ai_response)
+
+            # AGENT NON RECONNU : GEMINI
+            elif status == "agent_not_handled":
+                active_agent = "Gemini"
+                ai_response = "VISAGE-AI réfléchit..."
+
+                threading.Thread(
+                    target=ask_gemini,
+                    args=(result,),
+                    daemon=True
+                ).start()
+
+            # ERREUR AGENT
+            elif status == "agent_error":
+                is_thinking = False
+                active_agent = "Agent IA"
+
+                current_emotion = "sad"
+                current_intensity = 0.7
+
+                ai_response = (
+                    "Impossible d'exécuter la commande : "
+                    f"{result}"
+                )
+
+                face.set_emotion(
+                    current_emotion,
+                    current_intensity
+                )
+
+                print(ai_response)
+
+                speak_response(
+                    "Désolé, je n'ai pas pu "
+                    "exécuter cette commande."
+                )
+
+            # REPONSE GEMINI
+            elif status == "success":
+                is_thinking = False
+
+                if not isinstance(result, dict):
+                    result = {
+                        "emotion": "neutral",
+                        "intensity": 1.0,
+                        "response": str(result)
+                    }
+
+                current_emotion = result.get(
+                    "emotion", "neutral"
+                )
+
+                try:
+                    current_intensity = float(
+                        result.get("intensity", 1.0)
+                    )
+                except (ValueError, TypeError):
+                    current_intensity = 1.0
+
+                current_intensity = max(
+                    0.0,
+                    min(1.0, current_intensity)
+                )
+
+                ai_response = str(
+                    result.get("response", "")
+                )
+
+                face.set_emotion(
+                    current_emotion,
+                    current_intensity
+                )
+
+                print(
+                    "\nEMOTION :",
+                    current_emotion
+                )
+                print("REPONSE :", ai_response)
+
+                speak_response(ai_response)
+
+            # ERREUR GEMINI
+            elif status == "error":
+                is_thinking = False
+                active_agent = "Gemini"
+
+                current_emotion = "neutral"
                 current_intensity = 1.0
 
-            current_intensity = max(
-                0.0,
-                min(1.0, current_intensity)
-            )
-
-            ai_response = str(
-                result.get(
-                    "response",
-                    ""
+                ai_response = (
+                    f"Erreur Gemini : {result}"
                 )
-            )
+
+                face.set_emotion("neutral", 1.0)
+
+                print(ai_response)
+                resume_at = time.monotonic() + 1.0
+
+        # ====================================================
+        # FIN DE LA REPONSE VOCALE
+        # ====================================================
+
+        if was_speaking and not tts.speaking:
+            resume_at = time.monotonic() + 1.0
 
             face.set_emotion(
                 current_emotion,
                 current_intensity
             )
 
-            print(
-                "\nEMOTION :",
-                current_emotion
+        was_speaking = tts.speaking
+
+        # ====================================================
+        # ECOUTE AUTOMATIQUE
+        # ====================================================
+
+        if (
+            auto_mode
+            and not is_listening
+            and not is_thinking
+            and not tts.speaking
+            and not input_text.strip()
+            and time.monotonic() >= resume_at
+        ):
+            start_listening()
+
+        # ====================================================
+        # ANIMATION DE LA BOUCHE
+        # ====================================================
+
+        if tts.speaking:
+            if face.emotion != "talking":
+                face.set_emotion("talking", 0.65)
+
+        # ====================================================
+        # VISION : SUIVI DU VISAGE
+        # ====================================================
+
+        if vision_enabled:
+            detected, vx, vy = (
+                vision.get_face_position()
             )
 
-            print(
-                "REPONSE :",
-                ai_response
+            face.set_vision_position(
+                detected, vx, vy
             )
 
-            speak_response(ai_response)
+        else:
+            detected = False
+            face.set_vision_position(False)
 
-        # ERREUR GEMINI
-        elif status == "error":
+        # ====================================================
+        # ANIMATIONS
+        # ====================================================
 
-            is_thinking = False
+        face.update(dt)
+        face.draw(screen)
 
-            active_agent = "Gemini"
+        # ====================================================
+        # PANNEAU CONVERSATION
+        # ====================================================
 
-            current_emotion = "neutral"
-            current_intensity = 1.0
+        panel = pygame.Rect(
+            25, 15, WIDTH - 50, 155
+        )
 
-            ai_response = (
-                f"Erreur Gemini : {result}"
+        pygame.draw.rect(
+            screen,
+            (17, 27, 42),
+            panel,
+            border_radius=14
+        )
+
+        pygame.draw.rect(
+            screen,
+            (0, 165, 195),
+            panel,
+            width=1,
+            border_radius=14
+        )
+
+        vision_status = (
+            "Visage détecté"
+            if vision_enabled and detected
+            else "Recherche..."
+            if vision_enabled
+            else "OFF"
+        )
+
+        title = small_font.render(
+            (
+                f"VISAGE-AI | Emotion : {current_emotion}"
+                f" | Agent : {active_agent}"
+            ),
+            True,
+            (0, 220, 235)
+        )
+
+        screen.blit(title, (40, 25))
+
+        vision_label = small_font.render(
+            f"Vision : {vision_status} | F4 : caméra",
+            True,
+            (0, 200, 220)
+        )
+
+        screen.blit(
+            vision_label,
+            (40, 47)
+        )
+
+        draw_wrapped_text(
+            screen,
+            (
+                f"Vous : {last_message}"
+                if last_message
+                else "Vous : ..."
+            ),
+            40,
+            75,
+            WIDTH - 85,
+            (190, 210, 225),
+            small_font,
+            max_lines=1
+        )
+
+        draw_wrapped_text(
+            screen,
+            f"VISAGE : {ai_response}",
+            40,
+            110,
+            WIDTH - 85,
+            (235, 245, 255),
+            small_font,
+            max_lines=2
+        )
+
+        # ====================================================
+        # ZONE DE SAISIE
+        # ====================================================
+
+        pygame.draw.rect(
+            screen,
+            (18, 25, 38),
+            INPUT_RECT,
+            border_radius=10
+        )
+
+        pygame.draw.rect(
+            screen,
+            (0, 210, 230),
+            INPUT_RECT,
+            width=2,
+            border_radius=10
+        )
+
+        visible_text = input_text
+
+        while (
+            visible_text
+            and font.size(visible_text)[0]
+            > INPUT_RECT.width - 25
+        ):
+            visible_text = visible_text[1:]
+
+        if not visible_text:
+            visible_text = (
+                "F2 : vocal | F4 : caméra | "
+                "Entrée : envoyer du texte..."
             )
+            color = (115, 135, 155)
+        else:
+            color = (235, 245, 255)
 
-            face.set_emotion(
-                "neutral",
-                1.0
+        rendered = font.render(
+            visible_text,
+            True,
+            color
+        )
+
+        screen.blit(
+            rendered,
+            (
+                INPUT_RECT.x + 12,
+                INPUT_RECT.y + 10
             )
+        )
 
-            print(ai_response)
+        # ====================================================
+        # INDICATEUR D'ETAT
+        # ====================================================
 
-            resume_at = (
-                time.monotonic() + 1.0
+        if is_loading_stt:
+            indicator_text = "CHARGEMENT WHISPER"
+            indicator_color = (255, 205, 80)
+
+        elif is_listening:
+            indicator_text = "MICROPHONE ACTIF"
+            indicator_color = (255, 90, 90)
+
+        elif is_thinking:
+            indicator_text = (
+                f"AGENT ACTIF : {active_agent.upper()}"
             )
+            indicator_color = (255, 205, 80)
 
-    # ========================================================
-    # FIN DE LA REPONSE VOCALE
-    # ========================================================
+        elif tts.speaking:
+            indicator_text = "VISAGE-AI PARLE"
+            indicator_color = (0, 225, 180)
 
-    if was_speaking and not tts.speaking:
+        elif auto_mode:
+            indicator_text = "MODE VOCAL AUTOMATIQUE"
+            indicator_color = (0, 200, 220)
 
-        resume_at = (
-            time.monotonic() + 1.0
-        )
-
-        face.set_emotion(
-            current_emotion,
-            current_intensity
-        )
-
-    was_speaking = tts.speaking
-
-    # ========================================================
-    # DEMARRAGE AUTOMATIQUE DE L'ECOUTE
-    # ========================================================
-
-    if (
-        auto_mode
-        and not is_listening
-        and not is_thinking
-        and not tts.speaking
-        and not input_text.strip()
-        and time.monotonic() >= resume_at
-    ):
-
-        start_listening()
-
-    # ========================================================
-    # ANIMATION BOUCHE EXISTANTE
-    # ========================================================
-
-    if tts.speaking:
-
-        if face.emotion != "talking":
-
-            face.set_emotion(
-                "talking",
-                0.65
+        else:
+            indicator_text = (
+                "MODE CLAVIER | F2 POUR PARLER"
             )
+            indicator_color = (170, 190, 210)
 
-    # ========================================================
-    # ANIMATIONS
-    # ========================================================
-
-    face.update(dt)
-    face.draw(screen)
-
-    # ========================================================
-    # PANNEAU CONVERSATION
-    # ========================================================
-
-    panel = pygame.Rect(
-        25,
-        15,
-        WIDTH - 50,
-        155
-    )
-
-    pygame.draw.rect(
-        screen,
-        (17, 27, 42),
-        panel,
-        border_radius=14
-    )
-
-    pygame.draw.rect(
-        screen,
-        (0, 165, 195),
-        panel,
-        width=1,
-        border_radius=14
-    )
-
-    title = small_font.render(
-        (
-            f"VISAGE-AI | Emotion : {current_emotion}"
-            f" | Agent : {active_agent}"
-        ),
-        True,
-        (0, 220, 235)
-    )
-
-    screen.blit(
-        title,
-        (40, 25)
-    )
-
-    draw_wrapped_text(
-        screen,
-        (
-            f"Vous : {last_message}"
-            if last_message
-            else "Vous : ..."
-        ),
-        40,
-        55,
-        WIDTH - 85,
-        (190, 210, 225),
-        small_font,
-        max_lines=2
-    )
-
-    draw_wrapped_text(
-        screen,
-        f"VISAGE : {ai_response}",
-        40,
-        105,
-        WIDTH - 85,
-        (235, 245, 255),
-        small_font,
-        max_lines=2
-    )
-
-    # ========================================================
-    # ZONE DE SAISIE
-    # ========================================================
-
-    pygame.draw.rect(
-        screen,
-        (18, 25, 38),
-        INPUT_RECT,
-        border_radius=10
-    )
-
-    pygame.draw.rect(
-        screen,
-        (0, 210, 230),
-        INPUT_RECT,
-        width=2,
-        border_radius=10
-    )
-
-    visible_text = input_text
-
-    while (
-        visible_text
-        and font.size(visible_text)[0]
-        > INPUT_RECT.width - 25
-    ):
-
-        visible_text = visible_text[1:]
-
-    if not visible_text:
-
-        visible_text = (
-            "F2 : mode vocal auto | "
-            "Entree : envoyer du texte..."
+        indicator = small_font.render(
+            indicator_text,
+            True,
+            indicator_color
         )
 
-        color = (115, 135, 155)
-
-    else:
-        color = (235, 245, 255)
-
-    rendered = font.render(
-        visible_text,
-        True,
-        color
-    )
-
-    screen.blit(
-        rendered,
-        (
-            INPUT_RECT.x + 12,
-            INPUT_RECT.y + 10
+        indicator_rect = indicator.get_rect(
+            center=(WIDTH // 2, HEIGHT - 90)
         )
-    )
 
+        screen.blit(indicator, indicator_rect)
+
+        pygame.display.flip()
+
+finally:
     # ========================================================
-    # INDICATEUR D'ETAT
+    # FERMETURE
     # ========================================================
 
-    if is_loading_stt:
+    stop_listening.set()
+    vision.stop()
+    pygame.quit()
 
-        indicator_text = "CHARGEMENT WHISPER"
-        indicator_color = (255, 205, 80)
-
-    elif is_listening:
-
-        indicator_text = "MICROPHONE ACTIF"
-        indicator_color = (255, 90, 90)
-
-    elif is_thinking:
-
-        indicator_text = (
-            f"AGENT ACTIF : {active_agent.upper()}"
-        )
-
-        indicator_color = (255, 205, 80)
-
-    elif tts.speaking:
-
-        indicator_text = "VISAGE-AI PARLE"
-        indicator_color = (0, 225, 180)
-
-    elif auto_mode:
-
-        indicator_text = "MODE VOCAL AUTOMATIQUE"
-        indicator_color = (0, 200, 220)
-
-    else:
-
-        indicator_text = (
-            "MODE CLAVIER | F2 POUR PARLER"
-        )
-
-        indicator_color = (170, 190, 210)
-
-    indicator = small_font.render(
-        indicator_text,
-        True,
-        indicator_color
-    )
-
-    indicator_rect = indicator.get_rect(
-        center=(
-            WIDTH // 2,
-            HEIGHT - 90
-        )
-    )
-
-    screen.blit(
-        indicator,
-        indicator_rect
-    )
-
-    pygame.display.flip()
-
-
-# ============================================================
-# FERMETURE
-# ============================================================
-
-stop_listening.set()
-
-pygame.quit()
 sys.exit()

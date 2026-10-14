@@ -299,3 +299,24 @@ def draw_eye(
         ),
         3
     )
+    
+def draw_surprised_eye(surface, cx, cy, scale=1.0):
+    """Grand œil cyan rempli avec pupille sombre."""
+    from face.colors import CYAN, PUPIL
+
+    radius = int(67 * scale)
+    pupil_radius = int(25 * scale)
+
+    pygame.draw.circle(
+        surface,
+        CYAN,
+        (int(cx), int(cy)),
+        radius
+    )
+
+    pygame.draw.circle(
+        surface,
+        PUPIL,
+        (int(cx), int(cy)),
+        pupil_radius
+    )

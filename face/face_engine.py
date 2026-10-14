@@ -1,17 +1,11 @@
-import pygame
+
 import math
+import pygame
 
 from face.colors import BG
-
 from face.eyes import draw_eye
-
-from face.eyebrows import (
-    draw_eyebrow
-)
-
-from face.mouth import (
-    draw_mouth
-)
+from face.eyebrows import draw_eyebrow
+from face.mouth import draw_mouth
 
 from face.animations import (
     BlinkAnimation,
@@ -27,304 +21,204 @@ from face.emotions import (
 
 
 class FaceEngine:
-
-    def __init__(
-        self,
-        width,
-        height
-    ):
-
+    def __init__(self, width, height):
         self.width = width
         self.height = height
 
-        # ====================================================
-        # ETAT
-        # ====================================================
-
         self.emotion = "neutral"
-
         self.intensity = 1.0
-
         self.time = 0.0
 
-        # ====================================================
-        # ANIMATIONS
-        # ====================================================
-
         self.blink = BlinkAnimation()
+        self.breathing = BreathingAnimation()
 
-        self.breathing = (
-            BreathingAnimation()
-        )
+        neutral = EMOTION_PRESETS["neutral"]
 
-        # ====================================================
-        # PARAMETRES FLUIDES
-        # ====================================================
-
-        neutral = (
-            EMOTION_PRESETS["neutral"]
-        )
-
-        self.eye_open = SmoothValue(
-            neutral["eye_open"]
-        )
-
+        self.eye_open = SmoothValue(neutral["eye_open"])
         self.eyebrow_height = SmoothValue(
             neutral["eyebrow_height"]
         )
-
         self.eyebrow_angle = SmoothValue(
             neutral["eyebrow_angle"]
         )
-
-        self.smile = SmoothValue(
-            neutral["smile"]
-        )
-
+        self.smile = SmoothValue(neutral["smile"])
         self.mouth_open = SmoothValue(
             neutral["mouth_open"]
         )
 
         self.breathe = 0.0
 
-    # ========================================================
-    # SET EMOTION
-    # ========================================================
+        # Suivi par webcam
+        self.vision_enabled = True
+        self.face_detected = False
 
-    def set_emotion(
-        self,
-        emotion,
-        intensity=1.0
-    ):
+        self.vision_x = 0.0
+        self.vision_y = 0.0
 
+        # Position affichee du regard
+        self.look_x = 0.0
+        self.look_y = 0.0
+
+        # Vitesse de transition du regard
+        self.look_speed = 7.0
+
+    def set_emotion(self, emotion, intensity=1.0):
         if emotion not in VALID_EMOTIONS:
-
-            print(
-                "Emotion inconnue :",
-                emotion
-            )
-
+            print("Emotion inconnue :", emotion)
             return
 
         self.emotion = emotion
+        self.intensity = clamp(intensity, 0.0, 1.0)
 
-        self.intensity = clamp(
-            intensity,
-            0.0,
-            1.0
-        )
-
-        neutral = (
-            EMOTION_PRESETS["neutral"]
-        )
-
-        target = (
-            EMOTION_PRESETS[emotion]
-        )
+        neutral = EMOTION_PRESETS["neutral"]
+        target = EMOTION_PRESETS[emotion]
 
         def mix(parameter):
-
             return (
                 neutral[parameter]
-                +
-                (
-                    target[parameter]
-                    - neutral[parameter]
-                )
-                * self.intensity
+                + (
+                    target[parameter] - neutral[parameter]
+                ) * self.intensity
             )
 
-        self.eye_open.set_target(
-            mix("eye_open")
-        )
-
+        self.eye_open.set_target(mix("eye_open"))
         self.eyebrow_height.set_target(
             mix("eyebrow_height")
         )
-
         self.eyebrow_angle.set_target(
             mix("eyebrow_angle")
         )
-
-        self.smile.set_target(
-            mix("smile")
-        )
-
+        self.smile.set_target(mix("smile"))
         self.mouth_open.set_target(
             mix("mouth_open")
         )
 
-    # ========================================================
-    # UPDATE
-    # ========================================================
+    def set_vision_position(
+        self,
+        detected,
+        x=0.0,
+        y=0.0
+    ):
+        self.face_detected = bool(detected)
 
-    def update(self, dt):
+        if detected:
+            self.vision_x = clamp(
+                float(x), -1.0, 1.0
+            )
+            self.vision_y = clamp(
+                float(y), -1.0, 1.0
+            )
 
-        self.time += dt
+    def set_vision_enabled(self, enabled):
+        self.vision_enabled = bool(enabled)
 
-        self.blink.update(dt)
+        if not enabled:
+            self.face_detected = False
 
-        self.breathe = (
-            self.breathing.update(dt)
-        )
-
-        self.eye_open.update(dt)
-
-        self.eyebrow_height.update(dt)
-
-        self.eyebrow_angle.update(dt)
-
-        self.smile.update(dt)
-
-        self.mouth_open.update(dt)
-
-    # ========================================================
-    # REGARD SOURIS
-    # ========================================================
-
-    def get_look_direction(self):
+    def _get_target_look(self):
+        if (
+            self.vision_enabled
+            and self.face_detected
+        ):
+            return self.vision_x, self.vision_y
 
         mx, my = pygame.mouse.get_pos()
 
-        center_x = (
-            self.width / 2
-        )
-
-        center_y = (
-            self.height / 2
-        )
-
-        dx = (
-            mx - center_x
-        )
-
-        dy = (
-            my - center_y
-        )
-
         look_x = clamp(
-            dx / center_x,
+            (mx - self.width / 2)
+            / (self.width / 2),
             -1.0,
             1.0
         )
 
         look_y = clamp(
-            dy / center_y,
+            (my - self.height / 2)
+            / (self.height / 2),
             -1.0,
             1.0
         )
 
-        # Thinking :
-        # regard automatique vers le haut
         if self.emotion == "thinking":
-
             look_x = 0.45
             look_y = -0.55
 
-        return (
-            look_x,
-            look_y
+        return look_x, look_y
+
+    def update(self, dt):
+        self.time += dt
+
+        self.blink.update(dt)
+        self.breathe = self.breathing.update(dt)
+
+        for value in (
+            self.eye_open,
+            self.eyebrow_height,
+            self.eyebrow_angle,
+            self.smile,
+            self.mouth_open
+        ):
+            value.update(dt)
+
+        target_x, target_y = self._get_target_look()
+
+        # Lissage independant du FPS
+        factor = 1.0 - math.exp(
+            -self.look_speed * max(0.0, dt)
         )
 
-    # ========================================================
-    # DESSIN
-    # ========================================================
+        self.look_x += (
+            target_x - self.look_x
+        ) * factor
+
+        self.look_y += (
+            target_y - self.look_y
+        ) * factor
+
+    def get_look_direction(self):
+        return self.look_x, self.look_y
 
     def draw(self, surface):
-
         surface.fill(BG)
 
-        look_x, look_y = (
-            self.get_look_direction()
-        )
-
-        # ====================================================
-        # POSITIONS
-        # ====================================================
+        look_x, look_y = self.get_look_direction()
 
         left_x = 340
         right_x = 560
 
-        eye_y = (
-            290
-            + self.breathe
-        )
+        eye_y = 290 + self.breathe
+        eyebrow_y = 185 + self.breathe
 
-        eyebrow_y = (
-            185
-            + self.breathe
-        )
+        for side, x in (
+            ("left", left_x),
+            ("right", right_x)
+        ):
+            draw_eyebrow(
+                surface,
+                x,
+                eyebrow_y,
+                side,
+                self.eyebrow_height.current,
+                self.eyebrow_angle.current
+            )
 
-        # ====================================================
-        # SOURCILS
-        # ====================================================
-
-        draw_eyebrow(
-            surface,
-            left_x,
-            eyebrow_y,
-            "left",
-            self.eyebrow_height.current,
-            self.eyebrow_angle.current
-        )
-
-        draw_eyebrow(
-            surface,
-            right_x,
-            eyebrow_y,
-            "right",
-            self.eyebrow_height.current,
-            self.eyebrow_angle.current
-        )
-
-        # ====================================================
-        # YEUX
-        # ====================================================
-
-        draw_eye(
-            surface,
-            left_x,
-            eye_y,
-            "left",
-            self.blink.value,
-            self.eye_open.current,
-            look_x,
-            look_y
-        )
-
-        draw_eye(
-            surface,
-            right_x,
-            eye_y,
-            "right",
-            self.blink.value,
-            self.eye_open.current,
-            look_x,
-            look_y
-        )
-
-        # ====================================================
-        # TALKING
-        # ====================================================
+            draw_eye(
+                surface,
+                x,
+                eye_y,
+                side,
+                self.blink.value,
+                self.eye_open.current,
+                look_x,
+                look_y
+            )
 
         talking_amount = 0.0
 
         if self.emotion == "talking":
-
             talking_amount = (
                 0.25
-                +
-                abs(
-                    math.sin(
-                        self.time * 9
-                    )
-                )
-                * 0.75
+                + abs(math.sin(self.time * 9)) * 0.75
             )
-
-        # ====================================================
-        # BOUCHE
-        # ====================================================
 
         draw_mouth(
             surface,
